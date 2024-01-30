@@ -1,1 +1,1 @@
-# GitOps-TicTacToe-Config
+# GitOps-TicTacToe-Project-config
