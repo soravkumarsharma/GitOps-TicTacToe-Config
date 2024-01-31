@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: tictactoe-app-container
-        image: soravkumarsharma/gitops-tictactoe-app:v1
+        image: soravkumarsharma/gitops-tictactoe-app:34
         ports:
         - containerPort: 3000
 ---
