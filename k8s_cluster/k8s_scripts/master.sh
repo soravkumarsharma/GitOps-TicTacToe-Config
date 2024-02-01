@@ -21,41 +21,97 @@ echo "-------------Disabling swap-------------"
 swapoff -a
 sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
-#Install docker
-echo "-------------Installing Docker-------------"
-sudo apt-get update 
-sudo apt-get install -y docker.io
+#Install container.d
+echo "-------------Installing Containerd-------------"
+wget https://github.com/containerd/containerd/releases/download/v1.7.13/containerd-1.7.13-linux-amd64.tar.gz
+tar Cxzvf /usr/local containerd-1.7.13-linux-amd64.tar.gz
+wget https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+mkdir -p /usr/local/lib/systemd/system/
+mv containerd.service /usr/local/lib/systemd/system/containerd.service
+systemctl daemon-reload
+systemctl enable --now containerd
 
-#Install kubectl, kubelet and kubeadm
-echo "-------------Installing Kubectl, Kubelet and Kubeadm-------------"
-apt-get update && sudo apt-get install -y apt-transport-https curl
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+#Install runc
+echo "-------------Installing runC-------------"
+wget https://github.com/opencontainers/runc/releases/download/v1.1.12/runc.amd64
+install -m 755 runc.amd64 /usr/local/sbin/runc
 
-cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
-deb https://apt.kubernetes.io/ kubernetes-xenial main
+#Install the CNI
+echo "-------------Installing CNI-------------"
+wget https://github.com/containernetworking/plugins/releases/download/v1.4.0/cni-plugins-linux-amd64-v1.4.0.tgz
+mkdir -p /opt/cni/bin
+tar Cxzvf /opt/cni/bin cni-plugins-linux-amd64-v1.4.0.tgz
+
+#Install the crictl tool
+echo "-------------Installing crictl tool-------------"
+wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.22.0/crictl-v1.22.0-linux-amd64.tar.gz
+tar -zxvf crictl-v1.22.0-linux-amd64.tar.gz -C /usr/local/bin/
+rm -f crictl-v1.22.0-linux-amd64.tar.gz
+
+#Setting the endpoint in the config file
+echo "-------------Installing setting the endpoint-------------"
+cat <<EOF | sudo tee /etc/crictl.yaml
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 2
+debug: true
+pull-image-on-create: false
+EOF 
+
+#Forwarding IPv4 and letting iptables see bridged traffic
+echo "-------------Forwarding IPv4 and letting iptables see bridged traffic-------------"
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
 EOF
 
-apt update -y
-apt install -y kubelet kubeadm kubectl
+modprobe overlay
+modprobe br_netfilter
+
+# sysctl params required by setup, params persist across reboots
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+# Apply sysctl params without reboot
+sysctl --system
+sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.ipv4.ip_forward
+modprobe br_netfilter
+sysctl -p /etc/sysctl.conf
+
+# Install kubectl, kubelet and kubeadm
+echo "-------------Installing Kubectl, Kubelet and Kubeadm-------------"
+apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /
+EOF
+
+apt-get update -y
+apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 
-#Install kube-apiserver
-echo "-------------Installing kube-apiserver-------------"
-sudo snap install kube-apiserver
+echo "-------------Pulling Kueadm Images -------------"
+kubeadm config images pull
 
 echo "-------------Running kubeadm init-------------"
-kubeadm init --pod-network-cidr=10.244.0.0/16
+kubeadm init
 
 echo "-------------Copying Kubeconfig-------------"
-mkdir -p $HOME/.kube
-cp -iv /etc/kubernetes/admin.conf $HOME/.kube/config
+mkdir -p /root/.kube
+cp -iv /etc/kubernetes/admin.conf /root/.kube/config
 sudo chown $(id -u):$(id -g) /root/.kube/config
 
 echo "-------------Exporting Kubeconfig-------------"
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
-echo "-------------Deploying Flannel Pod Networking-------------"
-kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+echo "-------------Deploying Weavenet Pod Networking-------------"
+kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml
+
 
 echo "-------------Creating file with join command-------------"
 echo `kubeadm token create --print-join-command` > ./worker_join.sh
